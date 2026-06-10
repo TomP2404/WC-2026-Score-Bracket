@@ -664,6 +664,14 @@ function rAdmin(){
   let h='<div class="card"><h2>Admin · settings</h2>'+
   '<div class="row-flex"><button class="btn '+(S.settings.allowLate?'':'ghost')+'" onclick="toggleLate()">'+(S.settings.allowLate?'✓ Late boards allowed':'Allow late boards')+'</button></div>'+
   '<p class="small" style="margin-top:8px">Late boards still score but get a Late badge on the table.</p></div>';
+  h+='<div class="card"><h2>Backup & export</h2>'+
+  '<p class="note">Belt and braces. CSV opens straight in Excel (every pick, every board, points per game). JSON is a full snapshot you can restore from if anything ever goes wrong.</p>'+
+  '<div class="row-flex" style="margin-top:12px">'+
+  '<button class="btn sm" onclick="exportCSV()">⬇ Export to Excel (CSV)</button>'+
+  '<button class="btn ghost sm" onclick="exportJSON()">⬇ Full backup (JSON)</button></div>'+
+  '<hr class="chalk"><p class="small">Restore a JSON backup (overwrites matching boards/results):</p>'+
+  '<div class="row-flex" style="margin-top:8px"><input type="file" id="restore-file" accept=".json,application/json" style="color:var(--chalk-dim);font-size:12px;max-width:220px">'+
+  '<button class="btn danger sm" onclick="restoreJSON()">Restore backup</button></div></div>';
   h+='<div class="card"><h2>Manual results entry</h2><p class="note">Backup for the auto-refresh. Type scores, then Save. Knockouts need both teams (exact names), score after extra time, and the winner.</p>';
   for(const d of DATE_ORDER){
     if(dateKey(d)>dateKey(todayLabel()))break;
@@ -734,6 +742,78 @@ async function doDelBoard(id){ closeModal();
   S.boards=S.boards.filter(b=>b.id!==id);
   if(S.me&&S.me.boardId===id){ S.me=null; await sDel(K.me,false); }
   toast('Board deleted'); render(); }
+
+/* ================= EXPORT / BACKUP ================= */
+function dlFile(name, text, mime){
+  const blob=new Blob([text],{type:mime}); const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click();
+  setTimeout(()=>{URL.revokeObjectURL(a.href); a.remove();},800);
+}
+function csvEsc(v){ v=String(v==null?'':v); return '"'+v.replace(/"/g,'""')+'"'; }
+function pickPtsGroup(p,r){ if(!p||!r)return '';
+  if(p[0]===r[0]&&p[1]===r[1])return PTS_EXACT;
+  return Math.sign(p[0]-p[1])===Math.sign(r[0]-r[1])?PTS_WINNER:0; }
+function pickPtsKO(x,act){ if(!x||!x.winner||!act||!act.winner)return '';
+  if(x.winner!==act.winner)return 0;
+  const map={}; if(x.pick){map[x.home]=x.pick.h;map[x.away]=x.pick.a;}
+  const ex= map[act.home]===act.h&&map[act.away]===act.a&&
+    ((act.home===x.home&&act.away===x.away)||(act.home===x.away&&act.away===x.home));
+  return ex?PTS_EXACT:PTS_WINNER; }
+function exportCSV(){
+  const subs=S.boards.filter(b=>b.submittedAt);
+  if(!subs.length){toast('No submitted boards to export yet');return;}
+  const rows=[['Board','Owner','Submitted','Late','Stage','Match','Date','Home','Away','Pick home','Pick away','Pick pens winner','Actual home','Actual away','Actual winner','Points']];
+  subs.forEach(b=>{
+    const meta=[b.name,b.owner,new Date(b.submittedAt).toLocaleString('en-GB'),b.late?'Yes':''];
+    GROUP_FIX.forEach(f=>{
+      const p=(b.groupPicks||{})[f.id], r=S.results.group[f.id];
+      rows.push([...meta,'Group '+f.group,f.id,f.date,f.home,f.away,
+        p?p[0]:'',p?p[1]:'','', r?r[0]:'',r?r[1]:'','', pickPtsGroup(p,r)]);
+    });
+    const ko=resolveKO(b);
+    if(ko)KO_NUMS.forEach(m=>{
+      const x=ko[m], act=S.results.ko[m]||null, p=x.pick||{};
+      rows.push([...meta,ROUND_NAME[KO[m].r],'M'+m,KO[m].date,x.home||'',x.away||'',
+        p.h!=null?p.h:'',p.a!=null?p.a:'',(p.h===p.a&&x.winner)?x.winner:'',
+        act?act.h:'',act?act.a:'',act?act.winner:'', pickPtsKO(x,act)]);
+    });
+    const sc=scoreBoard(b,S.results);
+    rows.push([...meta,'TOTAL','','','','','','','','','','',sc.pts]);
+  });
+  const csv='\uFEFF'+rows.map(r=>r.map(csvEsc).join(',')).join('\r\n');
+  dlFile('wc26-league-export.csv',csv,'text/csv;charset=utf-8');
+  toast('CSV downloaded — opens in Excel');
+}
+function exportJSON(){
+  const snap={app:'wc26-predictor',exported:new Date().toISOString(),
+    settings:S.settings,results:S.results,boards:S.boards};
+  dlFile('wc26-league-backup-'+new Date().toISOString().slice(0,10)+'.json',JSON.stringify(snap,null,1),'application/json');
+  toast('Backup downloaded — keep it safe');
+}
+function restoreJSON(){
+  const inp=document.getElementById('restore-file');
+  if(!inp||!inp.files||!inp.files[0]){toast('Choose a backup file first');return;}
+  const fr=new FileReader();
+  fr.onload=()=>{
+    let snap; try{ snap=JSON.parse(fr.result); }catch(e){ toast('That file is not a valid backup'); return; }
+    if(!snap||snap.app!=='wc26-predictor'||!Array.isArray(snap.boards)){toast('That file is not a WC26 backup');return;}
+    modal('<h3>Restore backup?</h3><p class="note">From '+esc(snap.exported||'unknown date')+': <b>'+snap.boards.length+' boards</b> plus results and settings. This overwrites current data for those boards.</p>'+
+    '<div class="row-flex" style="margin-top:16px"><button class="btn danger" onclick="doRestore()">Restore</button><button class="btn ghost" onclick="closeModal()">Cancel</button></div>');
+    window.__restoreSnap=snap;
+  };
+  fr.readAsText(inp.files[0]);
+}
+async function doRestore(){
+  closeModal(); const snap=window.__restoreSnap; if(!snap)return;
+  toast('Restoring…');
+  let ok=true;
+  for(const b of snap.boards){ if(b&&b.id&&b.name){ ok=(await sSet(K.board(b.id),b,true))&&ok; } }
+  if(snap.results) ok=(await sSet(K.results,snap.results,true))&&ok;
+  if(snap.settings) ok=(await sSet(K.settings,snap.settings,true))&&ok;
+  window.__restoreSnap=null;
+  await reloadShared();
+  toast(ok?'Backup restored ✓':'Restore finished with some errors — check the table');
+}
 
 /* ================= INPUT WIRING ================= */
 function wire(){
